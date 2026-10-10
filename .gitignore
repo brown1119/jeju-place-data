@@ -1,0 +1,5 @@
+# Per-fetch metadata belongs in the Pages artifact, not a commit every 15 minutes.
+/public/status.json
+# Transaction staging is outside public/ and always removed by the publisher.
+/.publisher-*/
+/.cache/
