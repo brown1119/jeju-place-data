@@ -638,41 +638,87 @@ test('failure after the first replacement rolls back prior bytes and cleans stag
   await validatePublicDirectory(publicDir);
 });
 
-test('CLI fails closed without a public source and validates an existing artifact without a fetch', async t => {
-  const { syncData } = await implementation();
+test('CLI prepares and validates local committed snapshots without a source URL or network access', async t => {
   const publicDir = await sandbox(t);
   const scriptsDir = join(publicDir, '..', 'scripts');
   await mkdir(scriptsDir);
   const script = join(scriptsDir, 'sync-data.mjs');
   await writeFile(script, await readFile(new URL('../scripts/sync-data.mjs', import.meta.url), 'utf8'));
-  const env = { ...process.env };
-  delete env.PUBLIC_DATA_SOURCE_URL;
-  const run = (args = [], sourceUrl) => spawnSync(process.execPath, [script, ...args], { env: { ...env, ...(sourceUrl ? { PUBLIC_DATA_SOURCE_URL: sourceUrl } : {}) }, encoding: 'utf8', timeout: 5000 });
-  const missing = run();
-  assert.equal(missing.status, 1, 'missing source must exit nonzero');
-  assert.match(missing.stderr, /PUBLIC_DATA_SOURCE_URL/);
-  for (const url of ['http://127.0.0.1:9/', 'https://example.com/', 'https://user:PRIVATE@script.google.com/macros/s/id/exec', 'https://script.google.com/macros/s/id/dev']) {
-    const result = run([], url);
-    assert.equal(result.status, 1);
-    assert.doesNotMatch(result.stderr, /PRIVATE/);
-  }
-  assert.equal(run(['--unknown']).status, 1);
+  const run = args => spawnSync(process.execPath, [script, ...args], { env: { ...process.env, PUBLIC_DATA_SOURCE_URL: '' }, encoding: 'utf8', timeout: 5000 });
+  assert.equal(run([]).status, 1);
+  assert.match(run(['--unknown']).stderr, /Usage/);
   assert.equal(run(['--validate']).status, 1, 'missing assets cannot pass validation');
-  const url = await server(t, (_req, res) => sendJson(res, fixtureSource()));
-  await syncData(options(url, publicDir));
-  const before = await fileBytes(publicDir);
-  const valid = run(['--validate']);
-  assert.equal(valid.status, 0, valid.stderr);
-  assert.match(valid.stdout, /Validated/);
-  assert.deepEqual(await fileBytes(publicDir), before);
-  for (const { file, bytes } of hiddenArtifactCases(before)) {
-    await writeFile(join(publicDir, file), bytes);
-    const rejected = run(['--validate']);
-    assert.equal(rejected.status, 1, 'CLI must reject hidden raw members');
-    assert.match(rejected.stderr, /Validation failed:.*canonical/);
-    assert.ok(!`${rejected.stdout}${rejected.stderr}`.includes('SYNTHETIC'), 'CLI must not expose hidden values');
-    await writeFile(join(publicDir, file), before[file]);
+  assert.equal(run(['--prepare']).status, 1, 'missing snapshots cannot be published');
+  await mkdir(publicDir, { recursive: true });
+  const source = fixtureSource();
+  for (const [region, file] of Object.entries({ JEJU: 'jeju.json', NATIONAL: 'national.json' })) {
+    const rows = source.regions[region];
+    const snapshot = { schemaVersion: 1, region, version: createHash('sha256').update(JSON.stringify(rows)).digest('hex'), generatedAt: source.exportedAt, rows };
+    await writeFile(join(publicDir, file), `${JSON.stringify(snapshot, null, 2)}\n`);
   }
+  const prepared = run(['--prepare']);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.match(prepared.stdout, /Prepared validated Pages artifact/);
+  const before = await fileBytes(publicDir);
+  assert.equal(run(['--validate']).status, 0);
+  assert.deepEqual(await fileBytes(publicDir), before);
   await writeFile(join(publicDir, 'national.json'), '{}');
-  assert.equal(run(['--validate']).status, 1);
+  assert.equal(run(['--prepare']).status, 1);
+});
+
+test('prepares a Pages artifact from valid committed snapshots without fetching a source endpoint', async t => {
+  const { preparePagesPublication, validatePublicDirectory } = await implementation();
+  assert.equal(typeof preparePagesPublication, 'function', 'local snapshot preparation must exist');
+  const publicDir = await sandbox(t);
+  await mkdir(publicDir, { recursive: true });
+  const source = fixtureSource();
+  for (const [region, file] of Object.entries({ JEJU: 'jeju.json', NATIONAL: 'national.json' })) {
+    const rows = source.regions[region];
+    const version = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+    const generatedAt = region === 'JEJU' ? source.exportedAt : '2026-10-10T00:00:00.000Z';
+    const snapshot = { schemaVersion: 1, region, version, generatedAt, rows };
+    await writeFile(join(publicDir, file), `${JSON.stringify(snapshot, null, 2)}\n`);
+  }
+  await writeFile(join(publicDir, 'health.json'), `${JSON.stringify({schemaVersion:1,lastVerifiedAt:'2026-10-09T00:00:00.000Z'},null,2)}\n`);
+  const before = await fileBytes(publicDir);
+  const status = await preparePagesPublication({ publicDir, now: () => new Date('2026-10-10T01:15:00.000Z') });
+  assert.equal(status.checkedAt, '2026-10-10T01:15:00.000Z');
+  assert.equal(status.exportedAt, '2026-10-10T00:00:00.000Z');
+  assert.equal(status.regions.JEJU.rowCount, 1);
+  assert.equal(status.regions.NATIONAL.rowCount, 0);
+  assert.equal(await readFile(join(publicDir, 'jeju.json'), 'utf8'), before['jeju.json']);
+  assert.equal(await readFile(join(publicDir, 'national.json'), 'utf8'), before['national.json']);
+  assert.equal(JSON.parse(await readFile(join(publicDir, 'health.json'), 'utf8')).lastVerifiedAt, status.checkedAt);
+  const index = await readFile(join(publicDir, 'index.html'), 'utf8');
+  assert.match(index, /Latest successful validation/);
+  assert.match(index, /Latest Pages deployment verification/);
+  await validatePublicDirectory(publicDir);
+});
+
+test('rejects a valid snapshot larger than 4 MiB before generating Pages metadata', async t => {
+  const { preparePagesPublication } = await implementation();
+  const publicDir = await sandbox(t);
+  await mkdir(publicDir, { recursive: true });
+  const generatedAt = '2026-10-10T00:00:00.000Z';
+  const rows = Array.from({ length: 300 }, (_, i) => ({ ...fixtureRow(), no: i + 2, note: 'x'.repeat(20000) }));
+  for (const [region, file, data] of [
+    ['JEJU', 'jeju.json', rows], ['NATIONAL', 'national.json', []]
+  ]) {
+    const snapshot = { schemaVersion: 1, region, version: createHash('sha256').update(JSON.stringify(data)).digest('hex'), generatedAt, rows: data };
+    const text = `${JSON.stringify(snapshot, null, 2)}\n`;
+    if (region === 'JEJU') assert.ok(Buffer.byteLength(text) > 4 * 1024 * 1024);
+    await writeFile(join(publicDir, file), text);
+  }
+  await assert.rejects(preparePagesPublication({ publicDir }), /snapshot exceeds 4 MiB/);
+  assert.deepEqual((await readdir(publicDir)).sort(), ['jeju.json', 'national.json']);
+});
+
+test('rejects more than 20,000 source rows before writing any Pages files', async t => {
+  const { syncData } = await implementation();
+  const publicDir = await sandbox(t);
+  const source = fixtureSource();
+  source.regions.JEJU = Array.from({ length: 20001 }, (_, i) => ({ ...fixtureRow(), no: i + 2 }));
+  const url = await server(t, (_req, res) => sendJson(res, source));
+  await assert.rejects(syncData(options(url, publicDir, { maxBytes: 20 * 1024 * 1024 })), /bounded row array/);
+  await assert.rejects(readFile(join(publicDir, 'jeju.json'), 'utf8'), { code: 'ENOENT' });
 });

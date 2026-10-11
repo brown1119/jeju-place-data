@@ -31,7 +31,7 @@ function coordinate(value, min, max, label) {
   requireThat(typeof value === 'number' && Number.isFinite(value) && value !== 0 && value >= min && value <= max, `${label} must be a nonzero finite number within geographic bounds`);
 }
 function validateRows(rows, region) {
-  requireThat(Array.isArray(rows) && rows.length <= 100000, `${region} must be a bounded row array`);
+  requireThat(Array.isArray(rows) && rows.length <= 20000, `${region} must be a bounded row array`);
   const ids = new Set();
   return rows.map(row => {
     exactKeys(row, ROW_KEYS, `${region} row`);
@@ -63,7 +63,7 @@ function requireCanonicalJson(text, value) {
   requireThat(text === json(value), 'public JSON must use canonical publisher serialization');
 }
 function renderIndex(status) {
-  return `<!doctype html>\n<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Jeju Place public data</title><h1>Jeju Place public data</h1><p>Latest successful fetch: <a href="status.json">status.json</a>. Daily verification heartbeat: <a href="health.json">health.json</a> (lastVerifiedAt).</p><ul>${Object.entries(REGIONS).map(([region, file]) => `<li><a href="${file}">${region}</a>: ${status.regions[region].rowCount} rows; content exported at ${status.regions[region].generatedAt}; SHA-256 ${status.regions[region].version}</li>`).join('')}</ul><p>Times are UTC. Snapshot generatedAt changes only with row contents. CDN caches may lag; fetch status.json to inspect freshness.</p></html>\n`;
+  return `<!doctype html>\n<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Jeju Place public data</title><h1>Jeju Place public data</h1><p>Latest successful validation: <a href="status.json">status.json</a>. Latest Pages deployment verification: <a href="health.json">health.json</a> (lastVerifiedAt).</p><ul>${Object.entries(REGIONS).map(([region, file]) => `<li><a href="${file}">${region}</a>: ${status.regions[region].rowCount} rows; content exported at ${status.regions[region].generatedAt}; SHA-256 ${status.regions[region].version}</li>`).join('')}</ul><p>Times are UTC. Snapshot generatedAt changes only with row contents. CDN caches may lag; fetch status.json to inspect freshness.</p></html>\n`;
 }
 function validateUrl(value, allowInsecureLocalhost, isSource = false) {
   let url;
@@ -137,6 +137,7 @@ function validateHealth(health) {
   return health;
 }
 const PUBLIC_FILES = ['.nojekyll', 'health.json', 'index.html', 'jeju.json', 'national.json', 'status.json'];
+const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 const MAX_ASSET_BYTES = 64 * 1024 * 1024;
 async function inspectDirectory(publicDir, complete = false) {
   let info;
@@ -148,10 +149,19 @@ async function inspectDirectory(publicDir, complete = false) {
   const entries = await readdir(publicDir, { withFileTypes: true });
   requireThat(entries.every(entry => PUBLIC_FILES.includes(entry.name) && entry.isFile() && !entry.isSymbolicLink()), 'public directory contains unexpected or non-regular assets');
   if (complete) requireThat(entries.length === PUBLIC_FILES.length, 'public directory is incomplete');
-  for (const entry of entries) requireThat((await lstat(join(publicDir, entry.name))).size <= MAX_ASSET_BYTES, 'public asset exceeds size cap');
+  for (const entry of entries) {
+    const size = (await lstat(join(publicDir, entry.name))).size;
+    const isSnapshot = Object.values(REGIONS).includes(entry.name);
+    requireThat(size <= (isSnapshot ? MAX_SNAPSHOT_BYTES : MAX_ASSET_BYTES),
+      isSnapshot ? `${entry.name} snapshot exceeds 4 MiB` : 'public asset exceeds size cap');
+  }
 }
 function validateAssets(files) {
   exactKeys(files, PUBLIC_FILES, 'public assets');
+  for (const file of Object.values(REGIONS)) {
+    requireThat(typeof files[file] === 'string' && Buffer.byteLength(files[file], 'utf8') <= MAX_SNAPSHOT_BYTES,
+      `${file} snapshot exceeds 4 MiB`);
+  }
   const snapshots = Object.fromEntries(Object.entries(REGIONS).map(([region, file]) => [region, validateSnapshot(JSON.parse(files[file]), region)]));
   const status = JSON.parse(files['status.json']);
   exactKeys(status, ['schemaVersion', 'checkedAt', 'exportedAt', 'regions'], 'status');
@@ -166,7 +176,7 @@ function validateAssets(files) {
     requireThat(metadata.version === snapshot.version && metadata.generatedAt === snapshot.generatedAt && metadata.rowCount === snapshot.rows.length, 'status metadata does not match snapshots');
   }
   const health = validateHealth(JSON.parse(files['health.json']));
-  requireThat(health.lastVerifiedAt <= status.checkedAt, 'health cannot be newer than successful fetch');
+  requireThat(health.lastVerifiedAt <= status.checkedAt, 'health cannot be newer than successful Pages validation');
   requireThat(files['.nojekyll'] === '', '.nojekyll must be empty');
   requireThat(files['index.html'] === renderIndex(status), 'index must contain only generated status markup');
   for (const [region, file] of Object.entries(REGIONS)) requireCanonicalJson(files[file], snapshots[region]);
@@ -251,19 +261,52 @@ export async function syncData(options) {
   return status;
 }
 
+export async function preparePagesPublication(options) {
+  const { publicDir } = options;
+  await inspectDirectory(publicDir);
+  const snapshots = {};
+  for (const [region, file] of Object.entries(REGIONS)) {
+    const raw = await readOptional(join(publicDir, file));
+    requireThat(raw !== null, `${file} is missing; GAS must push snapshots first`);
+    let snapshot;
+    try { snapshot = JSON.parse(raw); } catch { throw new Error(`Validation failed: ${file} is not valid JSON`); }
+    validateSnapshot(snapshot, region);
+    requireCanonicalJson(raw, snapshot);
+    snapshots[region] = { snapshot, raw };
+  }
+  const checkedAt = (options.now?.() ?? new Date()).toISOString();
+  timestamp(checkedAt, 'checkedAt');
+  const exportedAt = Object.values(snapshots).map(value => value.snapshot.generatedAt).sort().pop();
+  const status = { schemaVersion: 1, checkedAt, exportedAt, regions: {} };
+  const files = {};
+  for (const [region, file] of Object.entries(REGIONS)) {
+    const snapshot = snapshots[region].snapshot;
+    files[file] = snapshots[region].raw;
+    status.regions[region] = { version: snapshot.version, generatedAt: snapshot.generatedAt, rowCount: snapshot.rows.length };
+  }
+  files['status.json'] = json(status);
+  files['health.json'] = json({ schemaVersion: 1, lastVerifiedAt: checkedAt });
+  files['index.html'] = renderIndex(status);
+  files['.nojekyll'] = '';
+  validateAssets(files);
+  await publishFiles(publicDir, files);
+  return status;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
+  if (args.length === 1 && args[0] === '--prepare') {
+    const status = await preparePagesPublication({ publicDir });
+    console.log(`Prepared validated Pages artifact at ${status.checkedAt}; JEJU ${status.regions.JEJU.rowCount} rows; NATIONAL ${status.regions.NATIONAL.rowCount} rows`);
+    return;
+  }
   if (args.length === 1 && args[0] === '--validate') {
     await validatePublicDirectory(publicDir);
     console.log('Validated public Pages assets');
     return;
   }
-  if (args.length !== 0) throw new Error('Usage: node scripts/sync-data.mjs [--validate]');
-  const sourceUrl = process.env.PUBLIC_DATA_SOURCE_URL;
-  if (!sourceUrl) throw new Error('PUBLIC_DATA_SOURCE_URL repository variable is required');
-  const status = await syncData({ sourceUrl, publicDir });
-  console.log(`Validated source at ${status.checkedAt}; JEJU ${status.regions.JEJU.rowCount} rows; NATIONAL ${status.regions.NATIONAL.rowCount} rows`);
+  throw new Error('Usage: node scripts/sync-data.mjs --prepare|--validate');
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try { await main(); } catch (error) {

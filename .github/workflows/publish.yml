@@ -3,17 +3,20 @@ name: Publish public place data
 'on':
   push:
     branches: [main]
+    paths:
+      - public/jeju.json
+      - public/national.json
+      - .github/workflows/publish.yml
+      - scripts/sync-data.mjs
+      - test/**
   workflow_dispatch:
-  schedule:
-    # UTC, away from the busiest top-of-hour slots; not a delivery guarantee.
-    - cron: '7,22,37,52 * * * *'
 
 concurrency:
   group: public-data-pages
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -26,12 +29,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out current main (including on reruns)
+      - name: Check out current main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
-          token: ${{ github.token }}
-          persist-credentials: true
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Set up current Node LTS
@@ -43,40 +45,19 @@ jobs:
       - name: Test publisher and workflow contract
         run: node --test test/*.test.mjs
 
-      - name: Fetch and validate actual approved public data
-        env:
-          PUBLIC_DATA_SOURCE_URL: ${{ vars.PUBLIC_DATA_SOURCE_URL }}
-        run: node scripts/sync-data.mjs
+      - name: Build metadata from committed GAS snapshots
+        run: node scripts/sync-data.mjs --prepare
 
-      - name: Validate the complete artifact before committing
+      - name: Validate the complete artifact
         run: node scripts/sync-data.mjs --validate
 
-      - name: Commit changed snapshots and daily verification heartbeat only
-        shell: bash
-        run: |
-          set -euo pipefail
-          git add -- public/jeju.json public/national.json public/index.html public/.nojekyll public/health.json
-          if git diff --cached --quiet; then
-            printf 'No tracked public-data changes; still deploying validated assets.\n'
-          else
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'data: sync public snapshots and verification health'
-            git push origin HEAD:main
-          fi
-
-      - name: Revalidate exact upload directory
-        run: node scripts/sync-data.mjs --validate
-
-      - name: Upload only validated public assets (never the repository root)
+      - name: Upload only validated public assets
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: public/
           include-hidden-files: true
           retention-days: 1
 
-      # GITHUB_TOKEN commits do not trigger another workflow/Pages build.
-      # Deployment intentionally happens here, even when no commit was needed.
       - name: Deploy Pages in this same workflow
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

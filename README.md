@@ -2,28 +2,30 @@
 
 제주·전국 장소 웹앱의 **공개 데이터 전용** GitHub Pages publisher.
 
-This public repository contains the publisher, its tests, and approved public snapshots. The original `brown1119/jeju-place` repository must remain **private**. Do not copy its Apps Script source, spreadsheet credentials, API keys, AI raw facts, or private columns here. Test fixtures are synthetic and stay in `test/` / temporary test directories; they are never published. No placeholder dataset is checked in: `public/` is created only after an actual source response passes validation.
+This public repository contains the publisher, tests, and current approved public snapshots. The original `brown1119/jeju-place` repository must remain **private**. Do not copy its Apps Script source, spreadsheet credentials, API keys, AI raw facts, or private columns here. Test fixtures are synthetic and stay in `test/` / temporary test directories; they are never published.
 
 ## Setup and manual updates
 
 1. Keep this repository public and the original application repository private.
-2. In **Settings → Secrets and variables → Actions → Variables**, set the repository variable `PUBLIC_DATA_SOURCE_URL` to the deployed, unauthenticated, **public-only** GAS `/exec` exporter URL. This is a nonsecret variable, not a credential. A query string selecting the public export is supported. Never put an API key or other secret in the URL.
-3. The GAS exporter must emit `application/json` and only already-visible approved public fields, in the contract below. Pages must use **GitHub Actions** as its build/deployment source. If main is protected, permit the workflow's `GITHUB_TOKEN` to push the approved generated files; no PAT is used. A denied or non-fast-forward push fails the job rather than publishing an inconsistent revision.
-4. Review these changes before committing/pushing them. Once enabled on `main`, use **Actions → Publish public place data → Run workflow**, selecting `main`, to request a manual update. Reruns check out current `main`, fetch again, and can deploy valid unchanged assets without needing a new snapshot commit.
+2. In this repository, open **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**. The current repository setting is already `workflow`.
+3. The existing private GAS project contains the read-only snapshot builder and publisher. It pushes only `public/jeju.json` and `public/national.json`; there is no anonymous GAS export URL.
+4. Create a fine-grained GitHub token limited to this repository with **Contents: Read and write** and no Actions permission. Add it in the existing GAS project’s **Project Settings → Script Properties** as `PUBLIC_DATA_GITHUB_TOKEN`. Do not put the token in source, this repository, Actions variables, or chat.
+5. As the owner, run `publishPublicDataNow()` once in the existing GAS editor to seed both snapshot files. Then run `installPublicDataPublisherTrigger()` once to install one 15-minute time-driven trigger. For later immediate updates, run `publishPublicDataNow()` or choose the spreadsheet Support menu item. Identical snapshots do not create a commit.
+6. Each token-authenticated data push triggers **GitHub Actions**, which tests the publisher contract, validates committed snapshots, creates Pages metadata locally, validates the complete public artifact, and deploys only `public/` to Pages. A manual workflow run republishes the latest committed snapshots and requires both snapshot files to exist; it does not read GAS.
 
 Local checks require Node LTS; there are no npm dependencies:
 
 ```sh
 node --test test/*.test.mjs
-PUBLIC_DATA_SOURCE_URL='https://script.google.com/macros/s/DEPLOYMENT_ID/exec' node scripts/sync-data.mjs
+node scripts/sync-data.mjs --prepare
 node scripts/sync-data.mjs --validate
 ```
 
-The example URL is a syntax example, not a live endpoint. The CLI writes only this repository's `public/`; it does not commit, push, change settings, or deploy. Do not run a fixture exporter into that directory. A missing URL, network error, invalid response, or failed validation exits nonzero; the workflow stops before commits/artifact upload/deployment, so the previous Pages deployment stays live.
+These CLI commands operate only on the checked-out repository. They do not read the spreadsheet, call GAS, commit, push, change settings, or deploy. `--prepare` requires valid committed `public/jeju.json` and `public/national.json`; missing or invalid snapshots fail closed. A rejected GAS export never reaches GitHub, and a rejected commit never reaches Pages. The previous Pages deployment remains live when validation or deployment fails.
 
 ## Source contract and publication boundary
 
-The source object has **exactly** `schemaVersion: 1`, `exportedAt` (canonical ISO UTC timestamp, `YYYY-MM-DDTHH:mm:ss.sssZ`), and `regions`. `regions` has exactly `JEJU` and `NATIONAL`, each an array. A legitimate empty region is accepted only from a validated source; it is not manufactured as a fallback.
+Each committed region snapshot has exactly `{schemaVersion:1, region:'JEJU'|'NATIONAL', version, generatedAt, rows}`. GAS reads both regions together, uses canonical field order, validates both before any Git write, and pushes changed files together in one non-force Git commit. Snapshot timestamps are per-region: when a region's rows are unchanged, its previous bytes and `generatedAt` remain untouched. `version` is the lowercase SHA-256 of UTF-8 `JSON.stringify(rows)` after canonicalizing each row's keys in the allowlist order. Array/row order remains source order; meaningful row ordering changes update the version.
 
 Every row must have exactly these keys, with no additional or missing keys:
 
@@ -39,13 +41,13 @@ Validation is intentionally fail-closed, not a best-effort filter:
 - `score`: finite JSON number in **(0,10]**: zero is rejected, ten is accepted. No `null`, numeric strings, booleans or nonfinite numbers.
 - `lat` / `lng`: **nonzero** finite numbers in `[-90,90]` / `[-180,180]`. Zero (including negative zero), `null`, numeric strings, missing coordinates and out-of-range values are rejected, not coerced.
 - All fields except `no`, `score`, `lat` and `lng` are bounded **strings**, not objects/arrays/numbers/booleans/null. `confidence` is textual (up to 200), not an arbitrary nested AI result. Empty text is allowed except `name` and `type`. Strings are never trimmed, truncated or silently converted.
-- Additional text bounds (UTF-16 code units): `nameVerified`, `rating`, `verifiedAt`, `address`, `closedDays`, `hours` up to 2,000; `menu` up to 10,000; `review`, `note` up to 20,000; `subregion`, `sido`, `sigungu`, `status`, `confidence`, `category` up to 200. The canonical ISO UTC timestamp rule applies to top-level `exportedAt`, snapshot `generatedAt`, and freshness metadata, **not** row `verifiedAt`.
-- Approved text fields are also checked for recognizable GitHub token, Google `AIza` API-key, and legacy/project/service-account/admin OpenAI key shapes. A match rejects the entire response/artifact without logging its value. Plain labels such as `API_KEY` or `GITHUB_TOKEN`, ordinary business/phone numbers and prices are not credentials. This is **not a complete secret scanner**: arbitrary private text, unknown token formats and encoded/fragmented secrets still require exporter-owner review. Detection does not authenticate any token or prove whether it is live.
-- At most 100,000 rows per region. The complete HTTP response is capped at **10 MiB** (including streamed/decompressed bytes); declared oversized responses are rejected early.
+- Additional text bounds (UTF-16 code units): `nameVerified`, `rating`, `verifiedAt`, `address`, `closedDays`, `hours` up to 2,000; `menu` up to 10,000; `review`, `note` up to 20,000; `subregion`, `sido`, `sigungu`, `status`, `confidence`, `category` up to 200. The canonical ISO UTC timestamp rule applies to snapshot `generatedAt` and freshness metadata, **not** row `verifiedAt`.
+- Approved text fields are also checked for recognizable GitHub token, Google `AIza` API-key, and legacy/project/service-account/admin OpenAI key shapes. A match rejects the entire response/artifact without logging its value. Plain labels such as `API_KEY` or `GITHUB_TOKEN`, ordinary business/phone numbers and prices are not credentials. This is **not a complete secret scanner**: arbitrary private text, unknown token formats and encoded/fragmented secrets still require owner review. Detection does not authenticate any token or prove whether it is live.
+- At most 20,000 rows per region, matching the GAS publisher and client validator. Each snapshot file is capped at **4 MiB**; oversized snapshots are rejected before the Git API write or Pages deployment.
 
-The private exporter owner must emit the actual GAS Reader/client public contract above; the publisher must not substitute invented boolean/numeric/ISO types for displayed text. If the public source contract changes, review both sides and update tests first; never silently widen the row allowlist. Source text is deliberately not printed in failure logs.
+The existing GAS publisher uses the exact Reader display contract above; it does not expose an anonymous export endpoint. If the sheet schema changes, review both the GAS snapshot validator and this Pages validator, update tests first, and never silently widen the row allowlist. Source text and credential values are not printed in logs.
 
-The publisher accepts HTTPS `script.google.com/macros/s/.../exec` as the source, follows at most five ContentService redirects only to approved Google hosts, and has one **30-second timeout across redirects and body reads**, enforced with `AbortController`. Loopback HTTP is an explicit library-only test option, not a CLI setting. It parses and validates both regions and every generated asset before touching existing public files. New contents are staged next to (not inside) `public/`, then replaced using same-filesystem atomic file renames; caught write errors attempt rollback. This is not a crash-proof multi-file filesystem transaction: power loss or SIGKILL during renames can interrupt it. The workflow revalidates the complete directory before upload and never deploys after a failed sync.
+Before any Git API write, GAS validates both region arrays, exact row keys/types/bounds, recognizable credential-shaped strings, canonical snapshot hashes, and the 4 MiB per-file cap. It compares existing blob contents and keeps prior bytes/timestamps when rows are unchanged. Changed files are written with the Git Data API as one commit and the `main` ref is advanced with `force:false`; a ref conflict is retried from the current head. The token stays in Apps Script Script Properties and is sent only in the GitHub API authorization header. Pages Actions has read-only repository permission and does not fetch or push source data.
 
 ## Generated assets and freshness
 
@@ -53,32 +55,32 @@ The only permitted Pages assets are:
 
 | Asset | Meaning | Tracked in git? |
 | --- | --- | --- |
-| `jeju.json`, `national.json` | Approved region snapshots | Yes |
-| `index.html`, `.nojekyll` | Generated status/index markup and Pages marker | Yes |
-| `health.json` | Successful verification heartbeat, at most once per UTC calendar date | Yes |
-| `status.json` | Latest successful fetch's `checkedAt`, source `exportedAt`, and region versions/timestamps/counts | No; regenerated and deployed each successful run |
+| `jeju.json`, `national.json` | Approved region snapshots pushed by the existing GAS project | Yes |
+| `index.html`, `.nojekyll` | Generated status/index markup and Pages marker | Yes (seed files; rebuilt in the artifact) |
+| `health.json` | Most recent successful Pages validation included in the artifact | Yes (seed file; refreshed in the artifact) |
+| `status.json` | Latest validation time, snapshot timestamps, row counts, and hashes | No; generated for every deployment |
 
 Each region snapshot has exactly `{schemaVersion:1, region:'JEJU'|'NATIONAL', version, generatedAt, rows}`. `version` is the lowercase SHA-256 of UTF-8 `JSON.stringify(rows)` after canonicalizing each row's keys in the allowlist order. Array/row order remains source order; meaningful row ordering changes update the version.
 
 When row contents/version are unchanged, snapshot **bytes, file modification times, and `generatedAt` remain unchanged**. `generatedAt` records the source export timestamp used when that content version was first published; it is **not** the last verification timestamp. The client consumes only region snapshots and must **not age-expire unchanged data based on `generatedAt`**.
 
-`health.json` contains exactly `{schemaVersion:1,lastVerifiedAt}`. It advances on the first successful, fully validated fetch on a new UTC date; failed fetches do not advance it. Its periodic commits keep stable datasets generating repository activity without churning region snapshots. `status.json` reports each run's finer-grained verification metadata without generating a commit every 15 minutes. The status page links both metadata files plus each snapshot's timestamp, row count, and hash. Click those JSON links to inspect freshness; metadata does not attest that every individual place was recently reviewed.
+`health.json` contains exactly `{schemaVersion:1,lastVerifiedAt}` and is set to the time of the most recent successful Pages validation run. It advances when data changes trigger a deployment or when an owner manually dispatches one; it is not a 15-minute heartbeat. `status.json` reports that run's validation time, per-region snapshot timestamps, row counts, and hashes. The status page links both metadata files plus each snapshot's timestamp, row count, and hash. Metadata records publisher validation, not whether every individual place was recently reviewed.
 
-Pages/CDN/browser caches can serve an earlier deployment temporarily. After a manual run, inspect the workflow's successful deployment and `status.json` / `health.json`; a cache-busting query or browser cache bypass can help diagnose old cached responses, but is not a consistency or freshness guarantee. There is no promised propagation delay or speed improvement.
+Pages/CDN/browser caches can serve an earlier deployment temporarily. After a GAS push, inspect the workflow's successful deployment and `status.json` / `health.json`; a cache-busting query or browser cache bypass can help diagnose old cached responses, but is not a consistency or freshness guarantee. There is no promised propagation delay or speed improvement.
 
 ## Workflow and schedule caveats
 
-`.github/workflows/publish.yml` runs on `push` to `main`, manual dispatch, and UTC cron `7,22,37,52 * * * *`. A shared concurrency group serializes publishing/deploying, with `cancel-in-progress: false`. GitHub may replace pending runs within a concurrency group; this is not a guaranteed queue of every tick.
+The existing GAS project checks for changed rows every 15 minutes. When rows change, it writes one commit to `main`; identical content produces no commit. `.github/workflows/publish.yml` runs on those data-file pushes and on manual dispatch. A shared concurrency group serializes Pages deployments, with `cancel-in-progress: false`. GitHub Actions is not the data scheduler and has no cron trigger in this design.
 
-GitHub documents that scheduled runs can be **delayed or dropped** under load, and public-repository schedules can be **automatically disabled after 60 days without repository activity**. The daily successful-fetch heartbeat helps maintain activity; it cannot guarantee execution, and prolonged source/workflow failures can still leave the schedule disabled. Monitor failures and re-enable the workflow in Actions if needed. Do not describe this as a guaranteed 15-minute refresh.
+Time-driven triggers and GitHub Actions can be delayed. If a GAS trigger fails or the token is revoked, no new data commit is made; the last successful Pages deployment remains live. Check Apps Script trigger executions and the repository Actions run after setup or a failure.
 
-The workflow uses only `GITHUB_TOKEN`, with `contents:write`, `pages:write`, and `id-token:write`. It stages only the two snapshots, index, marker, and daily health metadata. No PAT, private-repository checkout, broad `git add`, or credential copied into Pages is needed. Changes made with `GITHUB_TOKEN` do **not** trigger another normal push workflow or Pages build: artifact upload and `deploy-pages` deliberately run **in the same workflow**, including when snapshots are unchanged.
+The GAS token is a fine-grained credential limited to this data repository's **Contents: Read and write** permission. The workflow has only `contents:read`, `pages:write`, and `id-token:write`; it does not receive the GAS token or write source snapshots. The workflow performs upload and Pages deployment in one run, so the `GITHUB_TOKEN` recursion restriction is not relevant to the source push.
 
-The upload action points **only at `public/`**, never `.` or the repository root. Immediately before upload the validator requires exactly the six allowlisted regular files, rejects unknown files/directories/symlinks and oversized assets, validates all JSON/hash/metadata relationships, and requires the index to match the publisher's generated markup. Only the known empty `.nojekyll` hidden file is included. Scripts, tests, README, `.github`, source responses, and temporary staging are outside the artifact.
+The upload action points **only at `public/`**, never `.` or the repository root. Immediately before upload the validator requires exactly the six allowlisted regular files, rejects unknown files/directories/symlinks and oversized assets, validates all JSON/hash/metadata relationships, and requires the index to match the publisher's generated markup. Only the known empty `.nojekyll` hidden file is included. Scripts, tests, README, `.github`, and source responses are outside the artifact.
 
 ## Verification and official references
 
-The Node built-in test suite exercises real local HTTP servers for redirects, actual Reader display-string regressions, exact row keys/text caps, per-region row-id uniqueness, score/coordinate boundaries, legitimate empty regions without fallback, recognizable credential-shaped text (only obviously synthetic nonreal markers), invalid schemas/unknown fields, HTTP/network/timeout/body failures, last-good preservation, deterministic versions, immutable unchanged snapshots, daily successful-only heartbeat, strict artifact validation, write failures, CLI exit behavior, README and the workflow contract. Fixtures are isolated in temporary test directories. Source and pre-upload validation share the same row rules; tests rehash intentionally invalid local snapshots to ensure a valid hash cannot bypass them.
+The Node built-in test suite covers the exact row contract, credential-shaped text rejection, schema/hash/timestamp checks, byte and row limits, local-only legacy importer regression helpers, preparation and validation of committed snapshots, metadata generation, artifact allowlisting, rollback behavior, CLI exits, README and workflow contract. The active CLI/workflow path reads only committed JSON and performs no source-endpoint fetch. Fixtures are isolated in temporary directories; source values and credentials are never printed.
 
 The owner/parent reviewer verified these official action-tag commits read-only on **2026-10-09**. The workflow uses their immutable full-SHA pins, with major-version comments for readability; moving upstream tags do not automatically change executed code. Review upstream changes before updating pins and matching workflow tests:
 
@@ -102,4 +104,4 @@ The upload v5 input `include-hidden-files: true` is set explicitly for `.nojekyl
 - [GitHub token-trigger recursion rules](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)
 - [Google ContentService redirects](https://developers.google.com/apps-script/guides/content#redirects)
 
-Initial integration with the actual deployed public exporter and GitHub Pages still requires owner review/execution. Unit/integration tests do not substitute for checking that the real source contains only already-approved public data.
+Initial end-to-end verification of the existing private GAS GitHub publisher and this Pages workflow still requires owner setup/execution. Unit and integration tests do not substitute for checking that the real source contains only already-approved public data.
