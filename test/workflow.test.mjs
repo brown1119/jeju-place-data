@@ -44,6 +44,9 @@ test('README documents the actual Reader contract and reviewed immutable action 
   for (const contract of [
     'Settings → Pages → Build and deployment → Source',
     'select **GitHub Actions**',
+    'Automatic publishing is disabled.',
+    '`removePublicDataPublisherTrigger()`',
+    '`publishPublicDataNow()`',
     '`no`: safe integer **>= 2**, unique within each region',
     '`nameVerified`: confirmed-name string',
     '`rating`: formatted display string',
@@ -51,5 +54,6 @@ test('README documents the actual Reader contract and reviewed immutable action 
     '`score`: finite JSON number in **(0,10]**',
     'not a complete secret scanner',
   ]) assert.ok(readme.includes(contract), contract);
+  assert.doesNotMatch(readme, /installPublicDataPublisherTrigger|15-minute time-driven trigger|GAS project checks for changed rows every 15 minutes/i);
   for (const sha of ['3d3c42e5aac5ba805825da76410c181273ba90b1', '949feb2413d6458794dcd2491c4babbbce0c15c1', 'fc324d3547104276b827a68afc52ff2a11cc49c9', '368f82528645a54fb793d4d04e342629a3f51346']) assert.ok(readme.includes(sha), sha);
 });

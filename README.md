@@ -10,7 +10,7 @@ This public repository contains the publisher, tests, and current approved publi
 2. In this repository, open **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**. The current repository setting is already `workflow`.
 3. The existing private GAS project contains the read-only snapshot builder and publisher. It pushes only `public/jeju.json` and `public/national.json`; there is no anonymous GAS export URL.
 4. Create a fine-grained GitHub token limited to this repository with **Contents: Read and write** and no Actions permission. Add it in the existing GAS project’s **Project Settings → Script Properties** as `PUBLIC_DATA_GITHUB_TOKEN`. Do not put the token in source, this repository, Actions variables, or chat.
-5. As the owner, run `publishPublicDataNow()` once in the existing GAS editor to seed both snapshot files. Then run `installPublicDataPublisherTrigger()` once to install one 15-minute time-driven trigger. For later immediate updates, run `publishPublicDataNow()` or choose the spreadsheet Support menu item. Identical snapshots do not create a commit.
+5. As the owner, run `publishPublicDataNow()` once in the existing GAS editor to seed both snapshot files. Automatic publishing is disabled. To remove a previously installed publisher timer, run `removePublicDataPublisherTrigger()` once; if it reports another publishing operation holds the lock, retry after that operation finishes. For later updates, run `publishPublicDataNow()` or choose the spreadsheet Support menu item. Identical snapshots do not create a commit.
 6. Each token-authenticated data push triggers **GitHub Actions**, which tests the publisher contract, validates committed snapshots, creates Pages metadata locally, validates the complete public artifact, and deploys only `public/` to Pages. A manual workflow run republishes the latest committed snapshots and requires both snapshot files to exist; it does not read GAS.
 
 Local checks require Node LTS; there are no npm dependencies:
@@ -70,9 +70,9 @@ Pages/CDN/browser caches can serve an earlier deployment temporarily. After a GA
 
 ## Workflow and schedule caveats
 
-The existing GAS project checks for changed rows every 15 minutes. When rows change, it writes one commit to `main`; identical content produces no commit. `.github/workflows/publish.yml` runs on those data-file pushes and on manual dispatch. A shared concurrency group serializes Pages deployments, with `cancel-in-progress: false`. GitHub Actions is not the data scheduler and has no cron trigger in this design.
+The owner runs the existing GAS publisher manually when a refresh is needed. Each changed-data push writes one commit to `main`; identical content produces no commit. `.github/workflows/publish.yml` runs on those data-file pushes and on manual dispatch. A shared concurrency group serializes Pages deployments, with `cancel-in-progress: false`. GitHub Actions is not the data scheduler and has no cron trigger in this design.
 
-Time-driven triggers and GitHub Actions can be delayed. If a GAS trigger fails or the token is revoked, no new data commit is made; the last successful Pages deployment remains live. Check Apps Script trigger executions and the repository Actions run after setup or a failure.
+If the owner does not publish, the token is revoked, or an Actions deployment fails, no new data becomes live; the last successful Pages deployment remains available. Check Apps Script executions after manual publishing and the repository Actions run after a failure.
 
 The GAS token is a fine-grained credential limited to this data repository's **Contents: Read and write** permission. The workflow has only `contents:read`, `pages:write`, and `id-token:write`; it does not receive the GAS token or write source snapshots. The workflow performs upload and Pages deployment in one run, so the `GITHUB_TOKEN` recursion restriction is not relevant to the source push.
 
